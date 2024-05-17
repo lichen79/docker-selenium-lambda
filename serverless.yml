@@ -1,0 +1,146 @@
+service: docker-selenium-lambda
+
+provider:
+  name: aws
+  stage: ${opt:stage, 'prod'}
+  region: ${env:AWS_REGION, 'us-east-1'}
+  ecr:
+    images:
+      img:
+        path: ./
+        platform: linux/amd64
+  apiGateway:
+    shouldStartNameWithService: true
+    minimumCompressionSize: 1024
+
+functions:
+  urloader:
+    timeout: 30
+    # If you experience any errors such as Chrome crashing or not being available you might need to increase the storage available to your Lambda Function. See #102
+    memorySize: 2048
+    image:
+      name: img
+    role: MyFunctionExecutionRole  
+    environment:
+      BUCKET_NAME: my-bucket
+            
+resources:
+  Resources:
+    MyBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: !Sub 'geoimagebucket-${AWS::Region}'
+       
+    MyFunctionExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: !Sub 'my-role-${AWS::Region}'
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        Path: /
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: MyBucketAccess
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - "*"
+                  Resource:
+                    - !Join [ "", [ "arn:aws:s3:::", !Ref MyBucket ] ]
+                    - !Join [ "", [ "arn:aws:s3:::", !Ref MyBucket, "/*" ] ]
+
+
+
+
+    
+    ApiGatewayRestApi:
+      Type: "AWS::ApiGateway::RestApi"
+      Properties:
+        Name: "UrloaderAPI"
+        EndpointConfiguration:
+          Types:
+            - REGIONAL
+                    
+    ApiGatewayUrloaderResource:
+      Type: "AWS::ApiGateway::Resource"
+      Properties:
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ParentId:
+          Fn::GetAtt: [ApiGatewayRestApi, RootResourceId]
+        PathPart: "Urloader" 
+        
+        
+    UrloaderApiGatewayMethod:
+      Type: "AWS::ApiGateway::Method"
+      Properties:
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ResourceId:
+          Ref: ApiGatewayUrloaderResource
+        HttpMethod: "POST"
+        AuthorizationType: "NONE"        
+        Integration:
+          Type: "AWS"
+          IntegrationHttpMethod: "POST"
+          Uri:
+            Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UrloaderLambdaFunction.Arn}/invocations"
+          PassthroughBehavior: "WHEN_NO_TEMPLATES"
+          ContentHandling: "CONVERT_TO_TEXT"
+          RequestTemplates:
+            application/json: |
+              {
+                "queryStringParameters": {
+                "url": $input.json('$.url')
+                }
+              }
+          IntegrationResponses:
+            - StatusCode: 200
+              ResponseParameters:                
+                method.response.header.Access-Control-Allow-Origin: "'*'"
+                method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+                method.response.header.Access-Control-Allow-Headers: "'Content-Type'"              
+        MethodResponses:
+          - StatusCode: 200
+            ResponseModels:
+              "application/json": "Empty"   
+            ResponseParameters:                
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type'"
+
+                    
+    UrloaderLambdaPermission:
+      Type: "AWS::Lambda::Permission"
+      Properties:
+        FunctionName:
+          Fn::GetAtt: [UrloaderLambdaFunction, Arn]
+        Action: "lambda:InvokeFunction"
+        Principal: "apigateway.amazonaws.com"
+        SourceArn:
+          Fn::Sub: "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/POST/Urloader"
+            
+              
+    UrloaderApiGatewayDeployment:
+      Type: "AWS::ApiGateway::Deployment"
+      DependsOn:
+        - UrloaderApiGatewayMethod
+      Properties:
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        StageName: "${self:provider.stage}"          
+
+outputs:
+  UrloaderApiGatewayEndpoint:
+    Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}/Urloader"
+  BucketName:
+    Value: !Ref MyBucket
+
